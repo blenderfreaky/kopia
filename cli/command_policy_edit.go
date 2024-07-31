@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -54,6 +55,8 @@ type commandPolicyEdit struct {
 	policyTargetFlags
 
 	out textOutput
+
+	fromFilePath string
 }
 
 func (c *commandPolicyEdit) setup(svc appServices, parent commandParent) {
@@ -61,6 +64,8 @@ func (c *commandPolicyEdit) setup(svc appServices, parent commandParent) {
 	c.policyTargetFlags.setup(cmd)
 	cmd.Action(svc.repositoryWriterAction(c.run))
 	c.out.setup(svc)
+
+	cmd.Flag("from-file", "Import policy from json-file instead of opening an editor").StringVar(&c.fromFilePath)
 }
 
 func (c *commandPolicyEdit) run(ctx context.Context, rep repo.RepositoryWriter) error {
@@ -75,42 +80,72 @@ func (c *commandPolicyEdit) run(ctx context.Context, rep repo.RepositoryWriter) 
 			original = &policy.Policy{}
 		}
 
-		log(ctx).Infof("Editing policy for %v using external editor...", target)
+		if c.fromFilePath == "" {
+			log(ctx).Infof("Editing policy for %v using external editor...", target)
 
-		s := fmt.Sprintf(policyEditHelpText, target) + prettyJSON(original)
-		s = insertHelpText(s, `  "retention": {`, policyEditRetentionHelpText)
-		s = insertHelpText(s, `  "files": {`, policyEditFilesHelpText)
-		s = insertHelpText(s, `  "scheduling": {`, policyEditSchedulingHelpText)
+			s := fmt.Sprintf(policyEditHelpText, target) + prettyJSON(original)
+			s = insertHelpText(s, `  "retention": {`, policyEditRetentionHelpText)
+			s = insertHelpText(s, `  "files": {`, policyEditFilesHelpText)
+			s = insertHelpText(s, `  "scheduling": {`, policyEditSchedulingHelpText)
 
-		var updated *policy.Policy
+			var updated *policy.Policy
 
-		if err := editor.EditLoop(ctx, "policy.conf", s, func(edited string) error {
+			if err := editor.EditLoop(ctx, "policy.conf", s, func(edited string) error {
+				updated = &policy.Policy{}
+				d := json.NewDecoder(bytes.NewBufferString(edited))
+				d.DisallowUnknownFields()
+
+				return d.Decode(updated)
+			}); err != nil {
+				return errors.Wrap(err, "unable to launch editor")
+			}
+
+			if jsonEqual(updated, original) {
+				log(ctx).Infof("Policy for %v unchanged", target)
+				continue
+			}
+
+			log(ctx).Infof("Updated policy for %v\n%v", target, prettyJSON(updated))
+
+			c.out.printStdout("Save updated policy? (y/N) ")
+
+			var shouldSave string
+
+			fmt.Scanf("%v", &shouldSave) //nolint:errcheck
+
+			if strings.HasPrefix(strings.ToLower(shouldSave), "y") {
+				if err := policy.SetPolicy(ctx, rep, target, updated); err != nil {
+					return errors.Wrapf(err, "can't save policy for %v", target)
+				}
+			}
+		} else {
+			var updated *policy.Policy
+
+			file, err := os.ReadFile(c.fromFilePath)
+
+			if err != nil {
+				return errors.Wrap(err, "unable to read policy file")
+			}
+
 			updated = &policy.Policy{}
-			d := json.NewDecoder(bytes.NewBufferString(edited))
+			d := json.NewDecoder(bytes.NewBuffer(file))
 			d.DisallowUnknownFields()
 
-			return d.Decode(updated)
-		}); err != nil {
-			return errors.Wrap(err, "unable to launch editor")
-		}
+			err = d.Decode(updated)
 
-		if jsonEqual(updated, original) {
-			log(ctx).Infof("Policy for %v unchanged", target)
-			continue
-		}
+			if err != nil {
+				return errors.Wrap(err, "unable to decode policy file as valid json")
+			}
 
-		log(ctx).Infof("Updated policy for %v\n%v", target, prettyJSON(updated))
+			if jsonEqual(updated, original) {
+				log(ctx).Infof("Policy for %v unchanged", target)
+				continue
+			}
 
-		c.out.printStdout("Save updated policy? (y/N) ")
-
-		var shouldSave string
-
-		fmt.Scanf("%v", &shouldSave) //nolint:errcheck
-
-		if strings.HasPrefix(strings.ToLower(shouldSave), "y") {
 			if err := policy.SetPolicy(ctx, rep, target, updated); err != nil {
 				return errors.Wrapf(err, "can't save policy for %v", target)
 			}
+
 		}
 	}
 
