@@ -3,6 +3,7 @@ package cli_test
 import (
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,11 +38,7 @@ func TestExportPolicy(t *testing.T) {
 
 	// create a new policy
 	td := testutil.TempDirectory(t)
-	id := snapshot.SourceInfo{
-		Host:     "host",
-		UserName: "user",
-		Path:     td,
-	}.String()
+	id := mkPath(t, td)
 
 	e.RunAndExpectSuccess(t, "policy", "set", td, "--splitter=FIXED-4M")
 
@@ -126,4 +123,20 @@ func TestExportPolicy(t *testing.T) {
 
 	// writing to inaccessible file should fail
 	e.RunAndExpectFailure(t, "policy", "export", "--to-file", "/not/a/real/file/path")
+}
+
+func mkPath(t *testing.T, dir string) string {
+	t.Helper()
+
+	dir, err := filepath.Abs(dir)
+
+	if err != nil {
+		t.Fatalf("unable to get absolute path: %v", err)
+	}
+
+	return snapshot.SourceInfo{
+		Host:     "host",
+		UserName: "user",
+		Path:     dir,
+	}.String()
 }
